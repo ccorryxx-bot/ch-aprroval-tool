@@ -1,0 +1,41 @@
+name: Approve Join Requests
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # GitHub's minimum interval (can be delayed a few minutes)
+  workflow_dispatch:
+    inputs:
+      trigger:
+        description: "schedule | manual"
+        default: "manual"
+
+concurrency:
+  group: approve
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  approve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Approve pending join requests
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_API_TOKEN: ${{ secrets.WORKER_API_TOKEN }}
+          TRIGGER: ${{ github.event_name == 'workflow_dispatch' && inputs.trigger || 'schedule' }}
+        run: python scripts/approve.py

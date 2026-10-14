@@ -1,0 +1,19 @@
+name = "ch-aprroval-tool"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+workers_dev = true
+
+[vars]
+GH_REPO = "ccorryxx-bot/ch-aprroval-tool"
+GH_WORKFLOW = "approve.yml"
+GH_REF = "main"
+
+[[kv_namespaces]]
+binding = "CH_KV"
+id = "4cc9e206e68e4e4e9ae333354d5dcd0d"
+
+[observability]
+enabled = true
+
+# Secrets (set in Cloudflare dashboard -> Worker -> Settings -> Variables and Secrets):
+#   BOT_TOKEN, ADMIN_IDS, GH_PAT, API_TOKEN, WEBHOOK_SECRET
