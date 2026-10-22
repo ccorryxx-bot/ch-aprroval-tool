@@ -55,15 +55,45 @@ const adminIds = (env) =>
 const notifyAdmins = (env, text) => Promise.all(adminIds(env).map((id) => send(env, id, text)));
 
 // ---------- Channel id parsing ----------
+// Accepts: username (with/without @), -100id / bare numeric id, t.me/<username>[/post], t.me/c/<id>[/post]
+const RESERVED_PATHS = new Set([
+  "joinchat", "addlist", "addstickers", "addemoji", "share", "proxy", "socks",
+  "setlanguage", "boost", "giftcode", "invoice", "login", "contact",
+]);
+const USERNAME_RE = /^[A-Za-z][A-Za-z0-9_]{3,31}$/;
+
 function normalizeChannel(raw) {
-  let s = String(raw || "").trim();
+  const s = String(raw || "").trim();
   if (!s) return null;
-  const m = s.match(/^(?:https?:\/\/)?t\.me\/([A-Za-z][A-Za-z0-9_]{3,31})\/?$/i);
-  if (m) s = "@" + m[1];
+
+  // private channel message link: t.me/c/<id>/<msg>
+  let m = s.match(/^(?:https?:\/\/)?(?:t|telegram)\.me\/c\/(\d{6,})(?:[/?#].*)?$/i);
+  if (m) return "-100" + m[1];
+
+  // public link: t.me/<username>[/<msg>]
+  m = s.match(/^(?:https?:\/\/)?(?:t|telegram)\.me\/([A-Za-z0-9_]+)(?:[/?#].*)?$/i);
+  if (m) {
+    return USERNAME_RE.test(m[1]) && !RESERVED_PATHS.has(m[1].toLowerCase()) ? "@" + m[1] : null;
+  }
+
   if (/^@[A-Za-z][A-Za-z0-9_]{3,31}$/.test(s)) return s;
   if (/^-100\d{5,}$/.test(s)) return s;
   if (/^\d{6,}$/.test(s)) return "-100" + s;
+  if (USERNAME_RE.test(s)) return "@" + s; // bare name
   return null;
+}
+
+const isInviteLink = (raw) => /(?:t|telegram)\.me\/(?:\+|joinchat\/)/i.test(String(raw || ""));
+
+// Numbered list rendered as a monospace block (Telegram has no real tables)
+function channelTable(list) {
+  const w = String(list.length).length;
+  const rows = list.map((c, i) => {
+    const no = String(i + 1).padStart(w, " ");
+    const head = `${no}. ${esc(c.title || c.id)}`;
+    return c.title ? `${head}\n${" ".repeat(w + 2)}${esc(c.id)}` : head;
+  });
+  return `<pre>${rows.join("\n")}</pre>`;
 }
 
 // ---------- GitHub Actions dispatch ----------
@@ -87,8 +117,8 @@ async function dispatchRun(env, trigger = "manual") {
 
 // ---------- Bot commands ----------
 const COMMANDS = [
-  { command: "add", description: "Add channel (-100id or @username)" },
-  { command: "remove", description: "Remove channel (id or list number)" },
+  { command: "add", description: "Add channel (name, id or link)" },
+  { command: "remove", description: "Show channels, remove by number" },
   { command: "list", description: "Show channels" },
   { command: "run", description: "Approve all pending requests now" },
   { command: "on", description: "Enable scheduled auto-approve" },
@@ -100,8 +130,8 @@ const COMMANDS = [
 const HELP = [
   "<b>🤖 Channel Approval Tool</b>",
   "",
-  "/add &lt;-100id | @username&gt; — add channel",
-  "/remove &lt;id | list no.&gt; — remove channel",
+  "/add &lt;name | id | link&gt; — add channel",
+  "/remove — show list · /remove &lt;no.&gt; — remove",
   "/list — show channels",
   "/run — approve all pending now",
   "/on · /off — resume / pause scheduled runs",
@@ -132,6 +162,10 @@ async function statusText(env) {
   return lines.join("\n");
 }
 
+const ADD_USAGE =
+  "Usage: <code>/add &lt;name | id | link&gt;</code>\n" +
+  "<code>/add mychannel</code> · <code>/add -1001234567890</code> · <code>/add t.me/mychannel</code>";
+
 async function handleCommand(env, msg) {
   const chat = msg.chat.id;
   const [cmdRaw, ...rest] = (msg.text || "").trim().split(/\s+/);
@@ -143,9 +177,16 @@ async function handleCommand(env, msg) {
       return send(env, chat, HELP);
 
     case "/add": {
-      const id = normalizeChannel(rest[0]);
+      const raw = rest[0];
+      const id = normalizeChannel(raw);
       if (!id)
-        return send(env, chat, "Usage: <code>/add -1001234567890</code> or <code>/add @username</code>");
+        return send(
+          env,
+          chat,
+          isInviteLink(raw)
+            ? "Invite links can't be resolved. Use a username, channel id or <code>t.me/c/…</code> link.\n\n" + ADD_USAGE
+            : ADD_USAGE
+        );
       const list = await getChannels(env);
       if (list.some((c) => c.id.toLowerCase() === id.toLowerCase()))
         return send(env, chat, `Already added: <code>${esc(id)}</code>`);
@@ -159,29 +200,42 @@ async function handleCommand(env, msg) {
     }
 
     case "/remove": {
+      const list = await getChannels(env);
+      if (!list.length) return send(env, chat, "No channels yet. Use /add");
+
       const arg = rest[0];
       if (!arg)
-        return send(env, chat, "Usage: <code>/remove -1001234567890</code> or <code>/remove 2</code>");
-      const list = await getChannels(env);
+        return send(
+          env,
+          chat,
+          `<b>Channels (${list.length})</b>\n${channelTable(list)}\nRemove: <code>/remove &lt;no.&gt;</code>`
+        );
+
       let idx = -1;
       if (/^\d{1,3}$/.test(arg)) idx = Number(arg) - 1;
       else {
         const id = normalizeChannel(arg);
         if (id) idx = list.findIndex((c) => c.id.toLowerCase() === id.toLowerCase());
       }
-      if (idx < 0 || idx >= list.length) return send(env, chat, "Channel not found. Check /list");
+      if (idx < 0 || idx >= list.length)
+        return send(
+          env,
+          chat,
+          `❌ No match for <code>${esc(arg)}</code>\n<b>Channels (${list.length})</b>\n${channelTable(list)}`
+        );
+
       const [gone] = list.splice(idx, 1);
       await kvPut(env, "channels", list);
-      return send(env, chat, `🗑 Removed ${esc(gone.title || gone.id)} (${list.length} left)`);
+      const tail = list.length
+        ? `\n<b>Remaining (${list.length})</b>\n${channelTable(list)}`
+        : "\nNo channels left.";
+      return send(env, chat, `🗑 Removed ${esc(gone.title || gone.id)}${tail}`);
     }
 
     case "/list": {
       const list = await getChannels(env);
       if (!list.length) return send(env, chat, "No channels yet. Use /add");
-      const lines = list.map(
-        (c, i) => `${i + 1}. ${c.title ? `<b>${esc(c.title)}</b> ` : ""}<code>${esc(c.id)}</code>`
-      );
-      return send(env, chat, `<b>Channels (${list.length})</b>\n` + lines.join("\n"));
+      return send(env, chat, `<b>Channels (${list.length})</b>\n${channelTable(list)}`);
     }
 
     case "/on":
