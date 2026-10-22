@@ -1,12 +1,10 @@
 name: Approve Join Requests
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # GitHub's minimum interval (can be delayed a few minutes)
   workflow_dispatch:
     inputs:
       trigger:
-        description: "schedule | manual"
+        description: "manual"
         default: "manual"
 
 concurrency:
@@ -19,7 +17,7 @@ permissions:
 jobs:
   approve:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -37,5 +35,4 @@ jobs:
           TG_SESSION: ${{ secrets.TG_SESSION }}
           WORKER_URL: ${{ secrets.WORKER_URL }}
           WORKER_API_TOKEN: ${{ secrets.WORKER_API_TOKEN }}
-          TRIGGER: ${{ github.event_name == 'workflow_dispatch' && inputs.trigger || 'schedule' }}
         run: python scripts/approve.py

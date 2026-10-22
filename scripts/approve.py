@@ -1,8 +1,9 @@
-"""Approve all pending join requests for the channels configured in the Worker."""
+"""Approve ALL pending join requests, channel by channel. Manual /run only."""
 import asyncio
 import json
 import os
 import sys
+import time
 import urllib.request
 
 from telethon import TelegramClient, errors
@@ -14,6 +15,9 @@ from telethon.tl.functions.messages import (
 )
 
 UA = "ch-approval-runner/1.0"  # custom UA: Cloudflare may block the default python-urllib one
+TRIGGER = "manual"
+MAX_ROUNDS = 20          # safety cap per channel
+TIME_BUDGET = 20 * 60    # seconds for the whole run
 
 
 def env(name):
@@ -25,7 +29,6 @@ def env(name):
 
 WORKER_URL = env("WORKER_URL").rstrip("/")
 API_TOKEN = env("WORKER_API_TOKEN")
-TRIGGER = "manual" if os.environ.get("TRIGGER") == "manual" else "schedule"
 
 
 def call_worker(method, path, body=None):
@@ -89,25 +92,46 @@ async def resolve(client, ref, state):
     return await client.get_entity(key)
 
 
-async def process(client, ch, state):
+async def process(client, ch, state, deadline):
+    """Drain one channel completely (loop until pending == 0)."""
     res = {"id": ch["id"], "title": ch.get("title"), "approved": 0, "pending": 0, "error": None}
     try:
         entity = await resolve(client, ch["id"], state)
         res["title"] = getattr(entity, "title", None) or res["title"]
-        before = await with_flood(lambda: pending_count(client, entity))
-        if before:
+
+        for round_no in range(1, MAX_ROUNDS + 1):
+            if time.monotonic() > deadline:
+                res["error"] = "Time budget reached - run /run again"
+                break
+
+            before = await with_flood(lambda: pending_count(client, entity))
+            res["pending"] = before
+            if before == 0:
+                break
+
             await with_flood(
                 lambda: client(HideAllChatJoinRequestsRequest(peer=entity, approved=True))
             )
             await asyncio.sleep(1.5)
             after = await with_flood(lambda: pending_count(client, entity))
-            res["approved"] = max(before - after, 0)
+
+            done = max(before - after, 0)
+            res["approved"] += done
             res["pending"] = after
-        print(f"{res['title'] or ch['id']}: pending={before} approved={res['approved']}")
+            print(f"{res['title'] or ch['id']}: round {round_no} pending={before} -> {after} (+{done})")
+
+            if after == 0:
+                break
+            if done == 0:
+                res["error"] = f"No progress ({after} still pending)"
+                break
+        else:
+            res["error"] = f"{res['pending']} still pending after {MAX_ROUNDS} rounds"
     except errors.ChatAdminRequiredError:
         res["error"] = "Not admin / missing Invite Users right"
     except Exception as e:
         res["error"] = f"{type(e).__name__}: {e}"
+
     if res["error"]:
         print(f"{ch['id']}: ERROR {res['error']}")
     return res
@@ -116,14 +140,9 @@ async def process(client, ch, state):
 async def main():
     cfg = call_worker("GET", "/api/channels")
     channels = cfg.get("channels", [])
-
-    if not cfg.get("enabled", True) and TRIGGER != "manual":
-        print("Disabled via /off - skipping")
-        return
     if not channels:
         print("No channels configured")
-        if TRIGGER == "manual":
-            report(results=[])
+        report(results=[])
         return
 
     client = TelegramClient(
@@ -134,7 +153,10 @@ async def main():
         if not await client.is_user_authorized():
             raise RuntimeError("Session is not authorized - regenerate TG_SESSION")
         state = {"dialogs_loaded": False}
-        results = [await process(client, ch, state) for ch in channels]
+        deadline = time.monotonic() + TIME_BUDGET
+        results = []
+        for ch in channels:  # strictly sequential: A fully done, then B, then C
+            results.append(await process(client, ch, state, deadline))
         report(results=results)
     except Exception as e:
         msg = f"{type(e).__name__}: {e}"
