@@ -88,7 +88,7 @@ const isInviteLink = (raw) => /(?:t|telegram)\.me\/(?:\+|joinchat\/)/i.test(Stri
 // "/add" argument: "<name> | <id|link>" (or "<id|link> | <name>"), or just "<id|link|username>"
 const isStrongRef = (s) =>
   /^(?:-100)?\d{6,}$/.test(s) || s.startsWith("@") || /(?:t|telegram)\.me\//i.test(s);
-const PLACEHOLDER_IDS = new Set(["-1001234567890"]); // example id from old usage text
+const PLACEHOLDER_IDS = new Set(["-1001234567830"]); // example id from old usage text
 
 function parseAddArg(arg) {
   const text = String(arg || "").trim();
