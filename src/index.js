@@ -85,6 +85,40 @@ function normalizeChannel(raw) {
 
 const isInviteLink = (raw) => /(?:t|telegram)\.me\/(?:\+|joinchat\/)/i.test(String(raw || ""));
 
+// "/add" argument: "<name> | <id|link>" (or "<id|link> | <name>"), or just "<id|link|username>"
+const isStrongRef = (s) =>
+  /^(?:-100)?\d{6,}$/.test(s) || s.startsWith("@") || /(?:t|telegram)\.me\//i.test(s);
+const PLACEHOLDER_IDS = new Set(["-1001234567890"]); // example id from old usage text
+
+function parseAddArg(arg) {
+  const text = String(arg || "").trim();
+  if (!text) return { id: null, title: null };
+
+  const parts = text.split("|").map((p) => p.trim()).filter(Boolean);
+
+  if (parts.length >= 2) {
+    const first = parts[0];
+    const last = parts[parts.length - 1];
+    // "<id> | <name>"
+    if (isStrongRef(first) && !isStrongRef(last)) {
+      const id = normalizeChannel(first);
+      if (id) return { id, title: parts.slice(1).join(" | ") };
+    }
+    // "<name> | <id>"
+    return { id: normalizeChannel(last), title: parts.slice(0, -1).join(" | ") };
+  }
+
+  // no "|": "<name words> <id|link>" -> last token is the reference
+  const tokens = text.split(/\s+/);
+  if (tokens.length > 1 && isStrongRef(tokens[tokens.length - 1])) {
+    return {
+      id: normalizeChannel(tokens[tokens.length - 1]),
+      title: tokens.slice(0, -1).join(" "),
+    };
+  }
+  return { id: normalizeChannel(text), title: null };
+}
+
 // Numbered list rendered as a monospace block (Telegram has no real tables)
 function channelTable(list) {
   const w = String(list.length).length;
@@ -130,7 +164,8 @@ const COMMANDS = [
 const HELP = [
   "<b>🤖 Channel Approval Tool</b>",
   "",
-  "/add &lt;name | id | link&gt; — add channel",
+  "/add &lt;id | @username | link&gt; — add channel",
+  "/add &lt;name&gt; | &lt;id&gt; — add with a label",
   "/remove — show list · /remove &lt;no.&gt; — remove",
   "/list — show channels",
   "/run — approve all pending now",
@@ -163,13 +198,17 @@ async function statusText(env) {
 }
 
 const ADD_USAGE =
-  "Usage: <code>/add &lt;name | id | link&gt;</code>\n" +
-  "<code>/add mychannel</code> · <code>/add -1001234567890</code> · <code>/add t.me/mychannel</code>";
+  "Usage: <code>/add &lt;name&gt; | &lt;id | link&gt;</code>\n" +
+  "<code>/add Blue Car | -100XXXXXXXXXX</code>\n" +
+  "<code>/add -100XXXXXXXXXX</code> · <code>/add mychannel</code> · <code>/add t.me/mychannel</code>";
 
 async function handleCommand(env, msg) {
   const chat = msg.chat.id;
-  const [cmdRaw, ...rest] = (msg.text || "").trim().split(/\s+/);
+  const text = (msg.text || "").trim();
+  const cmdRaw = text.split(/\s+/)[0];
   const cmd = cmdRaw.split("@")[0].toLowerCase();
+  const arg = text.slice(cmdRaw.length).trim(); // full argument string (keeps spaces and "|")
+  const rest = arg ? arg.split(/\s+/) : [];
 
   switch (cmd) {
     case "/start":
@@ -177,25 +216,35 @@ async function handleCommand(env, msg) {
       return send(env, chat, HELP);
 
     case "/add": {
-      const raw = rest[0];
-      const id = normalizeChannel(raw);
+      const { id, title } = parseAddArg(arg);
       if (!id)
         return send(
           env,
           chat,
-          isInviteLink(raw)
+          isInviteLink(arg)
             ? "Invite links can't be resolved. Use a username, channel id or <code>t.me/c/…</code> link.\n\n" + ADD_USAGE
             : ADD_USAGE
         );
+      if (PLACEHOLDER_IDS.has(id))
+        return send(env, chat, "⚠️ That is only the example id. Send your real channel id.\n\n" + ADD_USAGE);
+
+      const label = title ? title.slice(0, 100) : null;
       const list = await getChannels(env);
-      if (list.some((c) => c.id.toLowerCase() === id.toLowerCase()))
+      const existing = list.find((c) => c.id.toLowerCase() === id.toLowerCase());
+      if (existing) {
+        if (label && existing.title !== label) {
+          existing.title = label;
+          await kvPut(env, "channels", list);
+          return send(env, chat, `✏️ Renamed <code>${esc(id)}</code> → <b>${esc(label)}</b>`);
+        }
         return send(env, chat, `Already added: <code>${esc(id)}</code>`);
-      list.push({ id, title: null, added: new Date().toISOString() });
+      }
+      list.push({ id, title: label, added: new Date().toISOString() });
       await kvPut(env, "channels", list);
       return send(
         env,
         chat,
-        `✅ Added <code>${esc(id)}</code> (${list.length} total)\nSession account must be admin with Invite Users right.`
+        `✅ Added ${label ? `<b>${esc(label)}</b> ` : ""}<code>${esc(id)}</code> (${list.length} total)\nSession account must be admin with Invite Users right.`
       );
     }
 

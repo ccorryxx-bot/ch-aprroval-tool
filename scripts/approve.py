@@ -129,6 +129,13 @@ async def process(client, ch, state, deadline):
             res["error"] = f"{res['pending']} still pending after {MAX_ROUNDS} rounds"
     except errors.ChatAdminRequiredError:
         res["error"] = "Not admin / missing Invite Users right"
+    except (errors.ChannelPrivateError, errors.UsernameNotOccupiedError, errors.UsernameInvalidError):
+        res["error"] = "Channel not reachable (wrong id/username, or the session account was removed). Fix it or /remove it"
+    except ValueError as e:
+        if "input entity" in str(e):
+            res["error"] = "Channel not found for the session account (wrong id, or the account is not a member/admin). Fix it or /remove it"
+        else:
+            res["error"] = f"ValueError: {e}"
     except Exception as e:
         res["error"] = f"{type(e).__name__}: {e}"
 
